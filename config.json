@@ -1,0 +1,31 @@
+{
+    "version": "1.0.0",
+    "description": "Newegg.Inc Humpback Log Driver",
+    "documentation": "-",
+    "entrypoint": ["./humpback-logdriver"],
+		"workdir": "/plugin",
+    "network": {
+      "type": "host"
+    },
+    "interface": {
+      "types": [
+        "docker.logdriver/1.0"
+      ],
+      "socket": "humpbacklogdriver.sock"
+    },
+    "env": [
+      {
+        "name": "PLUGIN_ENV",
+        "description": "set plugin env value.",
+        "value": "dev",
+        "settable": ["value"]
+      },
+      {
+        "name": "PLUGIN_LOGS_LEVEL",
+        "description": "set plugin debug out logs level.",
+        "value": "error",
+        "settable": ["value"]
+      }
+    ]
+  }
+  

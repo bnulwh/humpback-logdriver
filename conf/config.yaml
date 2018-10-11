@@ -1,0 +1,28 @@
+version: 1.0.0
+environment: dev
+discovery: 
+  hosts:
+    dev: zk://192.168.2.80:2181,192.168.2.81:2181,192.168.2.82:2181    
+    prd: etcd://192.168.2.80:2379,192.168.2.81:2379,192.168.2.82:2379
+  retryinterval: 30s
+  heartbeat: 60s
+  ttl: 320s
+providers:
+  wh7:
+    logstash:
+      host: 192.168.2.70:5000
+  prd:
+    kafka:
+      host: 192.168.2.80:9092
+      topic: humpback-logs
+      partition: 2
+  dev:
+    redis:
+      host: 192.168.2.70:6379
+      database: 0
+      list: humpback-logs 
+logs:
+  filename: ./logs/humpback-logdriver.log
+  level: error
+  maxsize: 20971520
+...
