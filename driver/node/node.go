@@ -69,7 +69,7 @@ func (pnode *Node) Close() error {
 
 func (pnode *Node) WatchProviders(fn WatchProvidersHandleFunc) {
 
-	pnode.Discovery.WatchExtends(PluginPath+"/providers", pnode.stopCh,
+	pnode.Discovery.WatchExtend(PluginPath+"/providers", pnode.stopCh,
 		func(key string, data []byte, err error) {
 			if err != nil {
 				hblogs.ERROR("[#node#] plugin node watch provides %s %s error, %s", pnode.Config.Environment, key, err)
