@@ -8,19 +8,14 @@ discovery:
   heartbeat: 60s
   ttl: 320s
 providers:
-  wh7:
+  dev:
     logstash:
       host: 192.168.2.70:5000
-  prd:
-    kafka:
-      host: 192.168.2.80:9092
-      topic: humpback-logs
-      partition: 2
-  dev:
-    redis:
-      host: 192.168.2.70:6379
-      database: 0
-      list: humpback-logs 
+blocks:
+  enable: true
+  maxsize: 3145728
+  maxcount: 40
+  retryinterval: 180s 
 logs:
   filename: ./logs/humpback-logdriver.log
   level: error

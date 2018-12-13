@@ -1,31 +1,61 @@
 {
-    "version": "1.0.0",
-    "description": "Newegg.Inc Humpback Log Driver",
-    "documentation": "-",
-    "entrypoint": ["./humpback-logdriver"],
-		"workdir": "/plugin",
-    "network": {
-      "type": "host"
-    },
-    "interface": {
-      "types": [
+  "version": "1.0.0",
+  "description": "humpback log driver plugin",
+  "documentation": "https://github.com/humpback/humpback-logdriver.git",
+  "entrypoint": ["./humpback-logdriver"],
+  "workdir": "/plugin",
+  "network": {
+    "type": "host"
+  },
+  "interface": {
+    "types": [
         "docker.logdriver/1.0"
-      ],
-      "socket": "humpbacklogdriver.sock"
+    ],
+    "socket": "humpbacklogdriver.sock"
+  },
+  "propagatedmount": "/run/docker/logging",
+  "env": [
+    {
+      "name": "PLUGIN_ENV",
+      "description": "set plugin env value.",
+      "value": "dev",
+      "settable": ["value"]
     },
-    "env": [
-      {
-        "name": "PLUGIN_ENV",
-        "description": "set plugin env value.",
-        "value": "dev",
-        "settable": ["value"]
-      },
-      {
-        "name": "PLUGIN_LOGS_LEVEL",
-        "description": "set plugin debug out logs level.",
-        "value": "error",
-        "settable": ["value"]
-      }
-    ]
-  }
-  
+    {
+      "name": "PLUGIN_LOGS_LEVEL",
+      "description": "set plugin debug out logs level.",
+      "value": "error",
+      "settable": ["value"]
+    },
+    {
+      "name": "PLUGIN_BLOCK_ENABLE",
+      "description": "set plugin stay block enable.",
+      "value": "true",
+      "settable": ["value"]
+    },
+    {
+      "name": "PLUGIN_BLOCK_MAXSIZE",
+      "description": "set plugin stay block max size.",
+      "value": "3145728",
+      "settable": ["value"]
+    },
+    {
+      "name": "PLUGIN_BLOCK_MAXCOUNT",
+      "description": "set plugin stay blocks max count.",
+      "value": "40",
+      "settable": ["value"]
+    },
+    {
+      "name": "PLUGIN_BLOCK_RETRYINTERVAL",
+      "description": "set plugin stay blocks retry interval.",
+      "value": "180s",
+      "settable": ["value"]
+    },
+    {
+      "name": "PLUGIN_HOST_IP",
+      "description": "set plugin host ipaddr.",
+      "value": "",
+      "settable": ["value"]
+    }
+  ]
+}

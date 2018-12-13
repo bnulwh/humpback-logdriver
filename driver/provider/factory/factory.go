@@ -11,6 +11,7 @@ import (
 	"github.com/humpback/humpback-logdriver/driver/provider"
 	"github.com/humpback/humpback-logdriver/driver/provider/kafka"
 	"github.com/humpback/humpback-logdriver/driver/provider/logstash"
+	"github.com/humpback/humpback-logdriver/driver/provider/ngmq"
 	"github.com/humpback/humpback-logdriver/driver/provider/redis"
 )
 
@@ -20,6 +21,7 @@ var Factories = map[string]ProviderFactoryFunc{
 	kafka.ProviderName:    kafka.New,
 	logstash.ProviderName: logstash.New,
 	redis.ProviderName:    redis.New,
+	ngmq.ProviderName:     ngmq.New,
 }
 
 var maxSwapWaitForDuration = time.Duration(time.Second * 5)
@@ -55,7 +57,7 @@ func (pfactory *ProviderFactory) Create(data map[string]interface{}) {
 			hblogs.INFO("[#provider#] provider create %s, %+v", key, provider)
 		}
 	}
-	pfactory.swapProvider(providers)
+	go pfactory.swapProvider(providers)
 }
 
 func (pfactory *ProviderFactory) Close() {

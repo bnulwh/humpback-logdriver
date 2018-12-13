@@ -31,6 +31,7 @@ type LogEntry struct {
 	Tag              string            `json:"tag"`
 	Extra            map[string]string `json:"extra"`
 	HostName         string            `json:"hostName"`
+	HostIP           string            `json:"hostIP"`
 	Message          string            `json:"message"`
 }
 

@@ -4,6 +4,10 @@ RUN apk add --no-cache bash
 
 RUN mkdir -p /plugin/logs
 
+RUN mkdir -p /run/docker/logging/meta_confs
+
+RUN mkdir -p /run/docker/logging/blocks
+
 ADD ./conf /plugin/conf
 
 ADD ./humpback-logdriver /plugin/

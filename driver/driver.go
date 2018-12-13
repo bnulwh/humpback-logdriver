@@ -21,14 +21,23 @@ import (
 	"github.com/docker/docker/daemon/logger/loggerutils"
 	protoio "github.com/gogo/protobuf/io"
 	hblogs "github.com/humpback/gounits/logger"
+	"github.com/humpback/gounits/network"
 	"github.com/humpback/gounits/rand"
 	"github.com/humpback/humpback-logdriver/conf"
 	"github.com/humpback/humpback-logdriver/driver/node"
 	"github.com/humpback/humpback-logdriver/driver/provider/factory"
+	"github.com/humpback/humpback-logdriver/driver/stay"
 	"github.com/pkg/errors"
 )
 
-const pluginName string = "humpback-logdriver:1.0"
+const (
+	pluginName      = "humpback-logdriver:1.0"
+	openFifoTimeout = 5 * time.Second
+)
+
+var (
+	pluginHostIP string
+)
 
 type logContext struct {
 	active bool
@@ -41,6 +50,7 @@ type logContext struct {
 type PluginDriver struct {
 	sync.Mutex
 	Node            *node.Node
+	StayBlocks      *stay.StayBlocks
 	ProviderFactory *factory.ProviderFactory
 	logCache        *LogCache
 	logPairs        map[string]*logContext
@@ -52,6 +62,12 @@ func New() (*PluginDriver, error) {
 		err   error
 		pNode *node.Node
 	)
+
+	pluginHostIP = conf.HostIP()
+	if pluginHostIP == "" {
+		pluginHostIP = network.GetDefaultIP()
+	}
+	hblogs.INFO("[#driver#] plugin host ipaddr %s.", pluginHostIP)
 
 	nodeConfig := conf.NodeConfigArgs()
 	if nodeConfig != nil {
@@ -73,25 +89,61 @@ func New() (*PluginDriver, error) {
 
 	dataMap := conf.Providers()
 	hblogs.INFO("[#driver#] init providers data %+v.", dataMap)
+	stayConfig := conf.StayBlocksConfig()
+	hblogs.INFO("[#driver#] stay blocks config %+v.", stayConfig)
+	pluginDriver.StayBlocks = stay.NewStayBlocks(stayConfig, pluginDriver.BlockHandleFunc)
 	providerFactory := factory.New(conf.Environment())
 	providerFactory.Create(dataMap)
 	pluginDriver.ProviderFactory = providerFactory
 	logCache := NewLogCache(pluginDriver.LogCacheHandleFunc)
 	pluginDriver.logCache = logCache
+	go pluginDriver.initLogPairs()
 	return pluginDriver, nil
 }
 
-func (pdriver *PluginDriver) Close() {
+func (pluginDriver *PluginDriver) initLogPairs() {
 
-	if pdriver.Node != nil {
-		pdriver.Node.Close()
+	metaInfos := loadMeta()
+	nSize := len(metaInfos)
+	hblogs.INFO("[#driver#] local meta infos %d...", nSize)
+	if nSize == 0 {
+		return
 	}
-	pdriver.logCache.Close()
-	pdriver.ProviderFactory.Close()
+
+	waitGroup := sync.WaitGroup{}
+	waitGroup.Add(nSize)
+	for metaFile, metaInfo := range metaInfos {
+		go func(mFile string, mInfo *MetaInfo) {
+			defer waitGroup.Done()
+			hblogs.INFO("[#driver#] meta %s >>> %+v...", mFile, mInfo.Info)
+			logCtx, err := runLogger(mInfo.File, *mInfo.Info, pluginDriver.logCache)
+			if err != nil {
+				removeMeta(mFile)
+				os.Remove(mInfo.File)
+				hblogs.ERROR("[#driver#] runlogger %s(%s) fail. %s", mInfo.Info.Name(), mInfo.Info.ID(), err)
+			} else {
+				pluginDriver.Lock()
+				pluginDriver.logPairs[mFile] = logCtx
+				pluginDriver.Unlock()
+				hblogs.INFO("[#driver#] runlogger %s(%s) is ready %p.", mInfo.Info.Name(), mInfo.Info.ID(), logCtx)
+			}
+		}(metaFile, metaInfo)
+	}
+	waitGroup.Wait()
+}
+
+func (pluginDriver *PluginDriver) Close() {
+
+	if pluginDriver.Node != nil {
+		pluginDriver.Node.Close()
+	}
+	pluginDriver.StayBlocks.Close()
+	pluginDriver.logCache.Close()
+	pluginDriver.ProviderFactory.Close()
 	hblogs.INFO("[#driver#] driver closed.")
 }
 
-func (pdriver *PluginDriver) WatchProvidersHandleFunc(data []byte) {
+func (pluginDriver *PluginDriver) WatchProvidersHandleFunc(data []byte) {
 
 	if data != nil {
 		var err error
@@ -101,122 +153,97 @@ func (pdriver *PluginDriver) WatchProvidersHandleFunc(data []byte) {
 			return
 		}
 		hblogs.INFO("[#driver#] watch providers data %+v.", dataMap)
-		pdriver.ProviderFactory.Create(dataMap)
+		pluginDriver.ProviderFactory.Create(dataMap)
 	}
 }
 
-func (pdriver *PluginDriver) LogCacheHandleFunc(entries []*LogEntry) {
+func (pluginDriver *PluginDriver) BlockHandleFunc(block string, data []byte) error {
+
+	size := len(data)
+	hblogs.INFO("[#driver#] block handle %s -> %d.", block, size)
+	var err error
+	if len(data) > 0 {
+		if err = pluginDriver.ProviderFactory.Write(data); err != nil {
+			hblogs.ERROR("[#driver#] block re-send error, %s.", err)
+		}
+	}
+	return err
+}
+
+func (pluginDriver *PluginDriver) LogCacheHandleFunc(entries []*LogEntry) {
 
 	if len(entries) > 0 {
 		buffer := codecLogsPool.Get().(*bytes.Buffer)
 		buffer.Reset()
 		codecLogsPool.Put(buffer)
 		if err := json.NewEncoder(buffer).Encode(entries); err == nil {
-			err = pdriver.ProviderFactory.Write(buffer.Bytes())
-			if err != nil {
+			data := buffer.Bytes()
+			if err = pluginDriver.ProviderFactory.Write(data); err != nil {
 				hblogs.ERROR("[#driver#] providers write data error, %s.", err)
-				//save this block buffer.
-				return
+				pluginDriver.StayBlocks.Write(data)
 			}
 		}
 	}
 }
 
-func (pdriver *PluginDriver) StartLogging(file string, info logger.Info) error {
+func (pluginDriver *PluginDriver) StartLogging(file string, info logger.Info) error {
 
-	hblogs.INFO("[#driver#] >>>> startlogging %s(%s), stream %s.", info.Name(), info.ID(), file)
-	pdriver.Lock()
-	if _, exists := pdriver.logPairs[path.Base(file)]; exists {
-		pdriver.Unlock()
+	hblogs.INFO("[#driver#] startlogging %s(%s), stream %s.", info.Name(), info.ID(), file)
+	baseFile := path.Base(file)
+	pluginDriver.Lock()
+	if _, exists := pluginDriver.logPairs[baseFile]; exists {
+		pluginDriver.Unlock()
 		return fmt.Errorf("logger for %q already exists", file)
 	}
-	pdriver.Unlock()
+	pluginDriver.Unlock()
 
-	if info.LogPath == "" {
-		info.LogPath = filepath.Join("/var/log/docker", info.ContainerID)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(info.LogPath), 0755); err != nil {
-		return errors.Wrap(err, "error setting up logger dir")
-	}
-
-	info.Config["max-size"] = "10m"
-	info.Config["max-file"] = "1"
-	fd, err := jsonfilelog.New(info)
+	hblogs.INFO("[#driver#] runlogger %s(%s)....", info.Name(), info.ID())
+	logCtx, err := runLogger(file, info, pluginDriver.logCache)
 	if err != nil {
-		return errors.Wrap(err, "error creating jsonfile logger")
-	}
-
-	stream, err := fifo.OpenFifo(context.Background(), file, syscall.O_RDONLY, 0700)
-	if err != nil {
-		return errors.Wrapf(err, "error opening logger fifo: %q", file)
-	}
-
-	tag, err := loggerutils.ParseLogTag(info, loggerutils.DefaultTemplate)
-	if err != nil {
+		hblogs.ERROR("[#driver#] runlogger %s(%s) fail. %s", info.Name(), info.ID(), err)
 		return err
 	}
 
-	extra, err := info.ExtraAttributes(nil)
-	if err != nil {
-		return err
+	if err = writeMeta(file, &info); err != nil {
+		hblogs.WARN("[#driver#] write meta %s error, %s", baseFile, err)
 	}
 
-	hostname, err := info.Hostname()
-	if err != nil {
-		return err
-	}
-
-	logCtx := &logContext{
-		active: true,
-		fd:     fd,
-		entry: LogEntry{
-			ContainerID:      info.FullID(),
-			ContainerName:    info.Name(),
-			ContainerCreated: JsonTime{info.ContainerCreated},
-			ImageID:          info.ImageFullID(),
-			ImageName:        info.ImageName(),
-			Command:          info.Command(),
-			Tag:              tag,
-			Extra:            extra,
-			HostName:         hostname,
-		},
-		stream: stream,
-		info:   info,
-	}
-
-	hblogs.INFO("[#driver#] >>>> logContext %s(%s) is ready %p.", info.Name(), info.ID(), logCtx)
-	pdriver.Lock()
-	pdriver.logPairs[path.Base(file)] = logCtx
-	pdriver.Unlock()
-	go consumeLogStream(pdriver.logCache, logCtx)
+	hblogs.INFO("[#driver#] runlogger %s(%s) is ready %p.", info.Name(), info.ID(), logCtx)
+	pluginDriver.Lock()
+	pluginDriver.logPairs[baseFile] = logCtx
+	pluginDriver.Unlock()
 	return nil
 }
 
-func (pdriver *PluginDriver) StopLogging(file string) error {
+func (pluginDriver *PluginDriver) StopLogging(file string) error {
 
-	hblogs.INFO("[#driver#] >>>> stoplogging stream %s.", file)
-	pdriver.Lock()
-	if logCtx, exists := pdriver.logPairs[path.Base(file)]; exists {
-		logCtx.active = false
-		delete(pdriver.logPairs, path.Base(file))
-		hblogs.INFO("[#driver#] >>>> stoplogging %s(%s) successed.", logCtx.info.Name(), logCtx.info.ID())
+	hblogs.INFO("[#driver#] stoplogging stream %s.", file)
+	baseFile := path.Base(file)
+	if err := removeMeta(file); err != nil {
+		hblogs.WARN("[#driver#] remove meta %s error, %s", baseFile, err)
 	}
-	pdriver.Unlock()
+
+	pluginDriver.Lock()
+	if logCtx, exists := pluginDriver.logPairs[baseFile]; exists {
+		stoplogger(file, logCtx)
+		delete(pluginDriver.logPairs, baseFile)
+		hblogs.INFO("[#driver#] stoplogging %s(%s) successed.", logCtx.info.Name(), logCtx.info.ID())
+	}
+	pluginDriver.Unlock()
 	return nil
 }
 
-func (pdriver *PluginDriver) ReadLogs(info logger.Info, logConfig logger.ReadConfig) (io.ReadCloser, error) {
+func (pluginDriver *PluginDriver) ReadLogs(info logger.Info, logConfig logger.ReadConfig) (io.ReadCloser, error) {
 
 	var logCtx *logContext
-	pdriver.Lock()
-	for _, value := range pdriver.logPairs {
+	pluginDriver.Lock()
+	for _, value := range pluginDriver.logPairs {
 		if value.info.FullID() == info.ContainerID {
 			logCtx = value
 			break
 		}
 	}
-	pdriver.Unlock()
+	pluginDriver.Unlock()
 
 	if logCtx == nil {
 		return nil, fmt.Errorf("logs does not found in local.")
@@ -262,6 +289,68 @@ func (pdriver *PluginDriver) ReadLogs(info logger.Info, logConfig logger.ReadCon
 	return r, nil
 }
 
+func runLogger(file string, info logger.Info, logCache *LogCache) (*logContext, error) {
+
+	if info.LogPath == "" {
+		info.LogPath = filepath.Join("/var/log/docker", info.ContainerID)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(info.LogPath), 0755); err != nil {
+		return nil, errors.Wrap(err, "error setting up logger dir")
+	}
+
+	info.Config["max-size"] = "10m"
+	info.Config["max-file"] = "1"
+	fd, err := jsonfilelog.New(info)
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating jsonfile logger")
+	}
+
+	ctx, _ := context.WithTimeout(context.Background(), openFifoTimeout)
+	stream, err := fifo.OpenFifo(ctx, file, syscall.O_RDONLY, 0700)
+	if err != nil {
+		fd.Close()
+		return nil, errors.Wrapf(err, "error opening logger fifo: %q", file)
+	}
+
+	tag, _ := loggerutils.ParseLogTag(info, loggerutils.DefaultTemplate)
+	hostName, _ := info.Hostname()
+	extra, _ := info.ExtraAttributes(nil)
+	if extra == nil {
+		extra = map[string]string{}
+	}
+
+	logCtx := &logContext{
+		active: true,
+		fd:     fd,
+		entry: LogEntry{
+			ContainerID:      info.FullID(),
+			ContainerName:    info.Name(),
+			ContainerCreated: JsonTime{info.ContainerCreated},
+			ImageID:          info.ImageFullID(),
+			ImageName:        info.ImageName(),
+			Command:          info.Command(),
+			Tag:              tag,
+			Extra:            extra,
+			HostName:         hostName,
+			HostIP:           pluginHostIP,
+		},
+		stream: stream,
+		info:   info,
+	}
+	go consumeLogStream(logCache, logCtx)
+	return logCtx, nil
+}
+
+func stoplogger(file string, logCtx *logContext) error {
+
+	if logCtx != nil {
+		logCtx.active = false
+		shutdown(logCtx)
+	}
+	return nil
+}
+
 func consumeLogStream(logCache *LogCache, logCtx *logContext) {
 
 	dec := protoio.NewUint32DelimitedReader(logCtx.stream, binary.BigEndian, 1e6)
@@ -279,9 +368,7 @@ func consumeLogStream(logCache *LogCache, logCtx *logContext) {
 
 		if err := dec.ReadMsg(&buf); err != nil {
 			if err == io.EOF {
-				if logCtx.active {
-					hblogs.ERROR("[#driver#] read %s(%s) logger EOF.", logCtx.info.Name(), logCtx.info.ID())
-				}
+				hblogs.INFO("[#driver#] read %s(%s) logger EOF.", logCtx.info.Name(), logCtx.info.ID())
 				return
 			}
 			dec = protoio.NewUint32DelimitedReader(logCtx.stream, binary.BigEndian, 1e6)

@@ -3,11 +3,13 @@ package conf
 import (
 	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/humpback/gounits/convert"
 	"github.com/humpback/gounits/logger"
+	"github.com/humpback/humpback-logdriver/driver/stay"
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -25,6 +27,7 @@ type NodeConfig struct {
 //Configuration is exported
 type Configuration struct {
 	Environment string `yaml:"environment" json:"environment"`
+	HostIP      string `yaml:"hostip" json:"hostip"`
 	Discovery   struct {
 		Hosts         map[string]interface{} `yaml:"hosts" json:"hosts"`
 		RetryInterval time.Duration          `yaml:"retryinterval" json:"retryinterval"`
@@ -32,7 +35,13 @@ type Configuration struct {
 		TTL           time.Duration          `yaml:"ttl" json:"ttl"`
 	} `yaml:"discovery" json:"discovery"`
 	Providers interface{} `yaml:"providers" json:"providers"`
-	Logs      struct {
+	Blocks    struct {
+		Enable        bool          `yaml:"enable" json:"enable"`
+		MaxSize       int64         `yaml:"maxsize" json:"maxsize"`
+		MaxCount      int           `yaml:"maxcount" json:"maxcount"`
+		RetryInterval time.Duration `yaml:"retryinterval" json:"retryinterval"`
+	} `yaml:"blocks" json:"blocks"`
+	Logs struct {
 		FileName string `yaml:"filename" json:"filename"`
 		Level    string `yaml:"level" json:"level"`
 		MaxSize  int64  `yaml:"maxsize" json:"maxsize"`
@@ -67,6 +76,38 @@ func New(fname string) error {
 		c.Logs.Level = pluginLogsLevel
 	}
 
+	pluginBlockEnable := os.Getenv("PLUGIN_BLOCK_ENABLE")
+	if pluginBlockEnable != "" {
+		if value, err := strconv.ParseBool(pluginBlockEnable); err == nil {
+			c.Blocks.Enable = value
+		}
+	}
+
+	pluginBlockMaxSize := os.Getenv("PLUGIN_BLOCK_MAXSIZE")
+	if pluginBlockMaxSize != "" {
+		if value, err := strconv.Atoi(pluginBlockMaxSize); err == nil {
+			c.Blocks.MaxSize = (int64)(value)
+		}
+	}
+
+	pluginBlockMaxCount := os.Getenv("PLUGIN_BLOCK_MAXCOUNT")
+	if pluginBlockMaxCount != "" {
+		if value, err := strconv.Atoi(pluginBlockMaxCount); err == nil {
+			c.Blocks.MaxCount = value
+		}
+	}
+
+	pluginBlockRetryInterval := os.Getenv("PLUGIN_BLOCK_RETRYINTERVAL")
+	if pluginBlockRetryInterval != "" {
+		if value, err := time.ParseDuration(pluginBlockRetryInterval); err == nil {
+			c.Blocks.RetryInterval = value
+		}
+	}
+
+	pluginHostIP := os.Getenv("PLUGIN_HOST_IP")
+	if pluginHostIP != "" {
+		c.HostIP = pluginHostIP
+	}
 	configuration = &c
 	return nil
 }
@@ -79,6 +120,14 @@ func Environment() string {
 		}
 	}
 	return "dev"
+}
+
+func HostIP() string {
+
+	if configuration != nil {
+		return configuration.HostIP
+	}
+	return ""
 }
 
 func NodeConfigArgs() *NodeConfig {
@@ -95,6 +144,19 @@ func NodeConfigArgs() *NodeConfig {
 					TTL:           configuration.Discovery.Heartbeat,
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func StayBlocksConfig() *stay.StayBlocksConfig {
+
+	if configuration != nil {
+		return &stay.StayBlocksConfig{
+			Enable:        configuration.Blocks.Enable,
+			MaxSize:       configuration.Blocks.MaxSize,
+			MaxCount:      configuration.Blocks.MaxCount,
+			RetryInterval: configuration.Blocks.RetryInterval,
 		}
 	}
 	return nil
